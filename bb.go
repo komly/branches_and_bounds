@@ -5,12 +5,19 @@ import (
 "math"
 "sort"
 "strings"
+	"container/heap"
+	"log"
 )
 
 type Matrix struct {
 	cols map[int]int
 	rows map[int]int
 	m    [][]float64
+}
+
+type pathElem struct {
+	r int
+	c int
 }
 
 func MatrixFromData(data [][]float64) *Matrix {
@@ -33,11 +40,11 @@ func MatrixFromData(data [][]float64) *Matrix {
 	cols := make(map[int]int)
 
 	for i := 0; i < len(data); i++ {
-		rows[i+1] = i
+		rows[i] = i
 	}
 
 	for i := 0; i < len(data[0]); i++ {
-		cols[i+1] = i //TODO: maybe from zero?
+		cols[i] = i
 	}
 	return &Matrix{
 		cols: cols,
@@ -173,6 +180,7 @@ func (m *Matrix) clone() *Matrix {
 		newCols[c] = v
 	}
 
+
 	marix := &Matrix{
 		m:    data,
 		rows: newRows,
@@ -183,6 +191,14 @@ func (m *Matrix) clone() *Matrix {
 }
 
 func (m *Matrix) removeRowAndCol(zr, zc int) *Matrix {
+	if _, ok := m.rows[zr]; !ok {
+		panic("can't delete not existing row")
+	}
+
+	if _, ok := m.cols[zc]; !ok {
+		panic("can't delete not existing row")
+	}
+
 	rows := make([]int, 0)
 	for r := range m.rows {
 		rows = append(rows, r)
@@ -218,6 +234,7 @@ func (m *Matrix) removeRowAndCol(zr, zc int) *Matrix {
 		if r > zr {
 			newRows[r] = v - 1
 
+
 		} else {
 			newRows[r] = v
 		}
@@ -230,11 +247,11 @@ func (m *Matrix) removeRowAndCol(zr, zc int) *Matrix {
 		}
 		if c > zc {
 			newCols[c] = v - 1
-
 		} else {
 			newCols[c] = v
 		}
 	}
+
 
 	matrix := &Matrix{
 		m:    data,
@@ -269,18 +286,29 @@ type Solution struct {
 	minBound   float64
 	zr, zc     int
 	maxPenalty float64
+	index    int
+	path []pathElem
 }
 
 func sum(m map[int]float64) float64 {
 	res := 0.0
 	for _, val := range m {
+		if val == math.MaxFloat64 {
+			continue
+		}
 		res += val
 	}
 	return res
 }
 
-func (s *Solution) reduce() {
+func (s *Solution) reduce() bool {
 	minForRows := s.matrix.getMinForRows()
+	for _, min := range minForRows {
+		if min == math.MaxFloat64 {
+			return false
+		}
+	}
+
 	s.matrix.fmap(func(v float64, r, c int) float64 {
 		if v != math.MaxFloat64 {
 			return v - minForRows[r]
@@ -289,6 +317,17 @@ func (s *Solution) reduce() {
 	})
 
 	minForCols := s.matrix.getMinForCols()
+	for _, min := range minForRows {
+		if min == math.MaxFloat64 {
+			return false
+		}
+	}
+	for _, min := range minForCols {
+		if min == math.MaxFloat64 {
+			return false
+		}
+	}
+
 
 	s.matrix.fmap(func(v float64, r, c int) float64 {
 		if v != math.MaxFloat64 {
@@ -299,6 +338,7 @@ func (s *Solution) reduce() {
 
 	s.minBound += sum(minForRows) + sum(minForCols)
 
+	found := false
 	s.matrix.each(func(v float64, r int, c int) {
 		if v == 0 {
 			penalty := s.matrix.getPenalty(r, c)
@@ -306,9 +346,12 @@ func (s *Solution) reduce() {
 				s.maxPenalty = penalty
 				s.zr = r
 				s.zc = c
+				found = true
 			}
 		}
 	})
+
+	return found
 }
 
 func (s *Solution) without() *Solution {
@@ -331,12 +374,51 @@ func (s *Solution) with() *Solution {
 		parent:   s,
 		matrix:   matrix,
 		minBound: s.minBound,
+		path: append(s.path, pathElem{s.zr, s.zc}),
 	}
 
 	return newSolution
 }
 
+type PriorityQueue []*Solution
+
+func (pq PriorityQueue) Len() int { return len(pq) }
+
+func (pq PriorityQueue) Less(i, j int) bool {
+	return pq[i].minBound > pq[j].minBound
+}
+
+func (pq PriorityQueue) Swap(i, j int) {
+	pq[i], pq[j] = pq[j], pq[i]
+	pq[i].index = i
+	pq[j].index = j
+}
+
+func (pq *PriorityQueue) Push(x interface{}) {
+	n := len(*pq)
+	item := x.(*Solution)
+	item.index = n
+	*pq = append(*pq, item)
+}
+
+func (pq *PriorityQueue) Pop() interface{} {
+	old := *pq
+	n := len(old)
+	item := old[n-1]
+	item.index = -1 // for safety
+	*pq = old[0 : n-1]
+	return item
+}
+
+func (pq *PriorityQueue) update(item *Solution, minBound float64) {
+	item.minBound = minBound
+	heap.Fix(pq, item.index)
+}
+
 func BranchesAndBounds(distances [][]float64, initialWay []int) []int {
+
+	upperBound := math.MaxFloat64
+
 	example := [][]float64{
 		{math.MaxFloat64, 26, 42, 15, 29, 25},
 		{7, math.MaxFloat64, 16, 1, 30, 25},
@@ -349,28 +431,36 @@ func BranchesAndBounds(distances [][]float64, initialWay []int) []int {
 	s := &Solution{
 		matrix: MatrixFromData(example),
 	}
-	s.reduce()
 
+	solutions := PriorityQueue(make([]*Solution, 0))
 
-	current := s
-	for {
-		fmt.Printf("%s\n\n", current.matrix.debugPrint())
-		fmt.Printf("(%d, %d): %.3f %.3f\n\n", current.zr, current.zc, current.minBound, current.maxPenalty)
+	heap.Init(&solutions)
 
-		if len(current.matrix.rows) <= 2 {
-			break
+	solutions.Push(s)
+
+	for len(solutions) > 0 {
+		current := solutions.Pop().(*Solution)
+		//fmt.Printf("%s\n\n", current.matrix.debugPrint())
+		//fmt.Printf("(%d, %d): %.3f %.3f\n\n", current.zr, current.zc, current.minBound, current.maxPenalty)
+
+		if len(current.matrix.m) == 2 {
+			log.Printf("Found full path: %+v", current.path)
+			continue
 		}
+
 		left := current.without()
-		left.reduce()
+		if left.reduce() && left.minBound < upperBound{
+			solutions.Push(left)
+		}
+
 
 		right := current.with()
-		right.reduce()
-
-		if left.minBound < right.minBound {
-			current = left
-		} else {
-			current = right
+		if right.reduce() && right.minBound < upperBound {
+			solutions.Push(right)
 		}
+
+
+
 
 	}
 
